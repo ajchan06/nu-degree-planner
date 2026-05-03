@@ -1,6 +1,5 @@
 import supabase from '../supabase.js'
 
-// ─── MAIN ENTRY POINT ───────────────────────────────────────────────────────
 export async function generatePlan(studentId) {
   const student = await loadStudent(studentId)
   const requirements = await loadRequirements(student.major_code, student.concentration)
@@ -19,9 +18,9 @@ export async function generatePlan(studentId) {
 
   const unsatisfied = checkRequirements(requirements, completedCodes)
   const selected = selectCourses(unsatisfied, allDoneCodes, requirements)
-  const withCoreqs = addCorequisites(selected, requirements.corequisites, allDoneCodes)
-  const ordered = topologicalSort(withCoreqs, requirements.prerequisites)
-  const plan = packSemesters(ordered, student, completedCodes, requirements)
+  const ordered = topologicalSort(selected, requirements.prerequisites)
+  const withCoreqs = addCorequisites(ordered, requirements.corequisites, allDoneCodes, requirements.allCoursesMap)
+  const plan = packSemesters(withCoreqs, student, completedCodes, requirements)
 
   return {
     student,
@@ -30,7 +29,6 @@ export async function generatePlan(studentId) {
   }
 }
 
-// ─── STEP 1: LOAD DATA ──────────────────────────────────────────────────────
 async function loadStudent(studentId) {
   const { data, error } = await supabase
     .from('students')
@@ -53,7 +51,7 @@ async function loadStudent(studentId) {
 }
 
 async function loadRequirements(majorCode, concentration) {
-  const [groupsRes, prereqRes, nupathRes, coreqRes, concRes] = await Promise.all([
+  const [groupsRes, prereqRes, nupathRes, coreqRes, concRes, allCoursesRes] = await Promise.all([
     supabase
       .from('requirement_groups')
       .select(`
@@ -85,26 +83,20 @@ async function loadRequirements(majorCode, concentration) {
 
     concentration ? supabase
       .from('concentration_courses')
-      .select(`
-        course_code,
-        is_required,
-        pick_n,
-        group_id,
-        courses (
-          code,
-          title,
-          credits,
-          is_lab
-        )
-      `)
+      .select('course_code, is_required, pick_n, group_id')
       .eq('major_code', majorCode)
-      .eq('concentration_name', concentration) : { data: [], error: null }
+      .eq('concentration_name', concentration) : { data: [], error: null },
+
+    supabase
+      .from('courses')
+      .select('code, title, credits, is_lab')
   ])
 
   if (groupsRes.error) throw new Error(groupsRes.error.message)
   if (prereqRes.error) throw new Error(prereqRes.error.message)
   if (nupathRes.error) throw new Error(nupathRes.error.message)
   if (coreqRes.error) throw new Error(coreqRes.error.message)
+  if (allCoursesRes.error) throw new Error(allCoursesRes.error.message)
 
   const nupathMap = {}
   for (const row of nupathRes.data) {
@@ -124,16 +116,21 @@ async function loadRequirements(majorCode, concentration) {
     coreqMap[row.course_code].push(row.coreq_code)
   }
 
+  const allCoursesMap = {}
+  for (const c of allCoursesRes.data) {
+    allCoursesMap[c.code] = c
+  }
+
   return {
     groups: groupsRes.data,
     prerequisites: prereqMap,
     nupathMap,
     corequisites: coreqMap,
-    concentrationCourses: concRes.data || []
+    concentrationCourses: concRes.data || [],
+    allCoursesMap
   }
 }
 
-// ─── STEP 2: CHECK REQUIREMENTS ─────────────────────────────────────────────
 function checkRequirements(requirements, completedCodes) {
   const unsatisfied = []
   const satisfiedNupath = new Set()
@@ -144,7 +141,9 @@ function checkRequirements(requirements, completedCodes) {
   }
 
   for (const group of requirements.groups) {
-    const courses = group.requirement_courses.map(rc => rc.courses).filter(Boolean)
+    const courses = group.requirement_courses
+      .map(rc => requirements.allCoursesMap[rc.course_code])
+      .filter(Boolean)
     const requiredCodes = group.requirement_courses
       .filter(rc => rc.is_required)
       .map(rc => rc.course_code)
@@ -185,7 +184,7 @@ function checkRequirements(requirements, completedCodes) {
       const earned = optionCodes
         .filter(code => completedCodes.has(code))
         .reduce((sum, code) => {
-          const course = courses.find(c => c.code === code)
+          const course = requirements.allCoursesMap[code]
           return sum + (course ? parseFloat(course.credits) : 0)
         }, 0)
       const needed = parseFloat(group.min_credits || 0)
@@ -223,7 +222,6 @@ function getNupathCode(groupName) {
   return map[groupName] || null
 }
 
-// ─── STEP 3 + 4: SELECT COURSES ─────────────────────────────────────────────
 function selectCourses(unsatisfied, allDoneCodes, requirements) {
   const selected = new Map()
   const satisfiedNupath = new Set()
@@ -234,8 +232,8 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
     if (req.type === 'ALL') {
       for (const code of req.missing) {
         if (!allDoneCodes.has(code) && !selected.has(code)) {
-          const course = req.options.find(c => c.code === code)
-          if (course) {
+          const course = requirements.allCoursesMap[code]
+          if (course && !course.is_lab) {
             selected.set(code, course)
             const nupath = requirements.nupathMap[code] || []
             nupath.forEach(n => satisfiedNupath.add(n))
@@ -247,7 +245,7 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
     if (req.type === 'ONE_OF') {
       if (req.isNupath && req.nupathCode && satisfiedNupath.has(req.nupathCode)) continue
       const best = req.options.find(c =>
-        !allDoneCodes.has(c.code) && !selected.has(c.code)
+        !allDoneCodes.has(c.code) && !selected.has(c.code) && !c.is_lab
       )
       if (best) {
         selected.set(best.code, best)
@@ -260,7 +258,7 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
       let creditsAdded = 0
       for (const course of req.options) {
         if (creditsAdded >= req.creditsNeeded) break
-        if (!allDoneCodes.has(course.code) && !selected.has(course.code)) {
+        if (!allDoneCodes.has(course.code) && !selected.has(course.code) && !course.is_lab) {
           selected.set(course.code, course)
           creditsAdded += parseFloat(course.credits)
           const nupath = requirements.nupathMap[course.code] || []
@@ -270,6 +268,7 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
     }
   }
 
+  // Add concentration courses
   if (requirements.concentrationCourses.length > 0) {
     const byGroup = {}
     for (const cc of requirements.concentrationCourses) {
@@ -277,24 +276,30 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
       byGroup[cc.group_id].push(cc)
     }
 
-    for (const groupId of Object.keys(byGroup)) {
+    for (const groupId of Object.keys(byGroup).sort()) {
       const group = byGroup[groupId]
       const required = group.filter(c => c.is_required)
       const optional = group.filter(c => !c.is_required)
-      const pickN = optional[0]?.pick_n || 0
+      const pickN = required.length > 0 ? required.length : (optional[0]?.pick_n || 0)
 
-      for (const cc of required) {
-        if (!allDoneCodes.has(cc.course_code) && !selected.has(cc.course_code) && cc.courses) {
-          selected.set(cc.course_code, cc.courses)
+      if (required.length > 0) {
+        for (const cc of required) {
+          if (!allDoneCodes.has(cc.course_code) && !selected.has(cc.course_code)) {
+            const courseData = requirements.allCoursesMap[cc.course_code]
+            if (courseData) selected.set(cc.course_code, courseData)
+          }
         }
-      }
-
-      let picked = 0
-      for (const cc of optional) {
-        if (picked >= pickN) break
-        if (!allDoneCodes.has(cc.course_code) && !selected.has(cc.course_code) && cc.courses) {
-          selected.set(cc.course_code, cc.courses)
-          picked++
+      } else {
+        let picked = 0
+        for (const cc of optional) {
+          if (picked >= pickN) break
+          if (!allDoneCodes.has(cc.course_code) && !selected.has(cc.course_code)) {
+            const courseData = requirements.allCoursesMap[cc.course_code]
+            if (courseData) {
+              selected.set(cc.course_code, courseData)
+              picked++
+            }
+          }
         }
       }
     }
@@ -303,26 +308,6 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
   return Array.from(selected.values())
 }
 
-// ─── ADD COREQUISITES ────────────────────────────────────────────────────────
-function addCorequisites(courses, coreqMap, allDoneCodes) {
-  const result = []
-  const courseSet = new Set(courses.map(c => c.code))
-
-  for (const course of courses) {
-    result.push(course)
-    const coreqs = coreqMap[course.code] || []
-    for (const coreqCode of coreqs) {
-      if (!courseSet.has(coreqCode) && !allDoneCodes.has(coreqCode)) {
-        courseSet.add(coreqCode)
-        result.push({ code: coreqCode, _coreqOf: course.code })
-      }
-    }
-  }
-
-  return result
-}
-
-// ─── STEP 5: TOPOLOGICAL SORT ───────────────────────────────────────────────
 function topologicalSort(courses, prereqMap) {
   const courseSet = new Set(courses.map(c => c.code))
   const visited = new Set()
@@ -343,10 +328,34 @@ function topologicalSort(courses, prereqMap) {
   return result
 }
 
-// ─── STEP 6: PACK INTO SEMESTERS ────────────────────────────────────────────
+function addCorequisites(courses, coreqMap, allDoneCodes, allCoursesMap) {
+  const result = []
+  const courseSet = new Set(courses.map(c => c.code))
+
+  for (const course of courses) {
+    result.push(course)
+    const coreqs = coreqMap[course.code] || []
+    for (const coreqCode of coreqs) {
+      if (!courseSet.has(coreqCode) && !allDoneCodes.has(coreqCode)) {
+        courseSet.add(coreqCode)
+        const coreqData = allCoursesMap[coreqCode] || {}
+        result.push({
+          code: coreqCode,
+          title: coreqData.title || coreqCode,
+          credits: coreqData.credits || 0,
+          is_lab: coreqData.is_lab || true,
+          _coreqOf: course.code
+        })
+      }
+    }
+  }
+
+  return result
+}
+
 function packSemesters(orderedCourses, student, completedCodes, requirements) {
-  const MAX_CREDITS = 17
-  const SUMMER_MAX = 8
+  const MAX_CREDITS = 19
+  const SUMMER_MAX = 9
   const placed = new Map()
   const semesters = generateSemesters(student.target_graduation, student.catalog_year)
   const semesterPlans = semesters.map(s => ({
@@ -356,7 +365,6 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
     credits: 0
   }))
 
-  // Add COOP3945 to co-op semesters automatically
   for (let i = 0; i < semesterPlans.length; i++) {
     if (semesterPlans[i].type === 'coop') {
       semesterPlans[i].courses.push({
@@ -368,7 +376,6 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
     }
   }
 
-  // Place regular courses first
   const regularCourses = orderedCourses.filter(c => !c._coreqOf)
   const coreqCourses = orderedCourses.filter(c => c._coreqOf)
 
@@ -398,7 +405,6 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
     }
   }
 
-  // Place coreqs in same semester as their parent
   for (const course of coreqCourses) {
     if (!course.code) continue
     const parentIndex = placed.get(course._coreqOf)
@@ -406,17 +412,6 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
       semesterPlans[parentIndex].courses.push(course)
       semesterPlans[parentIndex].credits += parseFloat(course.credits || 0)
       placed.set(course.code, parentIndex)
-    } else {
-      for (let i = 0; i < semesterPlans.length; i++) {
-        if (semesterPlans[i].type === 'coop') continue
-        const maxForSem = semesterPlans[i].type === 'summer' ? SUMMER_MAX : MAX_CREDITS
-        if (semesterPlans[i].credits + parseFloat(course.credits || 0) <= maxForSem) {
-          semesterPlans[i].courses.push(course)
-          semesterPlans[i].credits += parseFloat(course.credits || 0)
-          placed.set(course.code, i)
-          break
-        }
-      }
     }
   }
 
@@ -425,9 +420,14 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
 
 function generateSemesters(targetGraduation, catalogYear) {
   const semesters = []
-  const startYear = catalogYear || new Date().getFullYear()
-  let year = startYear
-  let season = 'Fall'
+  const now = new Date()
+  const currentMonth = now.getMonth()
+  const currentYear = now.getFullYear()
+  let year = currentYear
+  let season = currentMonth < 7 ? 'Fall' : 'Spring'
+  if (season === 'Spring') year += 1
+
+  const startYear = year
 
   const coopSemesters = new Set([
     `Spring ${startYear + 1}`,
@@ -462,7 +462,6 @@ function generateSemesters(targetGraduation, catalogYear) {
   return semesters
 }
 
-// ─── STEP 7: BUILD SUMMARY ──────────────────────────────────────────────────
 function buildSummary(requirements, completedCodes, selectedCourses) {
   const selectedCodes = new Set(selectedCourses.map(c => c.code))
   const allCodes = new Set([...completedCodes, ...selectedCodes])
