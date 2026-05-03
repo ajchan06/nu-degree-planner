@@ -12,6 +12,8 @@ router.post('/', async (req, res) => {
       major_code,
       concentration,
       catalog_year,
+      start_year,
+      num_coops,
       target_graduation
     } = req.body
 
@@ -29,12 +31,19 @@ router.post('/', async (req, res) => {
         major_code,
         concentration,
         catalog_year,
+        start_year,
+        num_coops,
         target_graduation
       }])
       .select()
       .single()
 
-    if (error) throw error
+    if (error) {
+      if (error.code === '23505') {
+        return res.status(409).json({ error: 'An account with this email already exists.' })
+      }
+      throw error
+    }
     res.status(201).json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
