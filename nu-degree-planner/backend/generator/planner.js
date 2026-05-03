@@ -16,15 +16,24 @@ export async function generatePlan(studentId) {
   )
   const allDoneCodes = new Set([...completedCodes, ...plannedCodes])
 
+  const completedCredits = student.student_courses
+    .filter(c => ['completed', 'in_progress', 'ap', 'transfer_approved'].includes(c.status))
+    .reduce((sum, c) => sum + parseFloat(c.credits || 0), 0)
+
+  const startYear = student.start_year || new Date().getFullYear()
+  const numCoops = student.num_coops || 2
+  const targetGraduation = calculateGraduation(completedCredits, numCoops, startYear)
+
   const unsatisfied = checkRequirements(requirements, completedCodes)
   const selected = selectCourses(unsatisfied, allDoneCodes, requirements)
   const ordered = topologicalSort(selected, requirements.prerequisites)
   const withCoreqs = addCorequisites(ordered, requirements.corequisites, allDoneCodes, requirements.allCoursesMap)
-  const plan = packSemesters(withCoreqs, student, completedCodes, requirements)
+  const plan = packSemesters(withCoreqs, student, completedCodes, requirements, targetGraduation, startYear)
 
   return {
     student,
     plan,
+    targetGraduation,
     summary: buildSummary(requirements, completedCodes, selected)
   }
 }
@@ -226,13 +235,11 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
   const selected = new Map()
   const satisfiedNupath = new Set()
 
-  // Initialize satisfiedNupath from already completed courses
   for (const code of allDoneCodes) {
     const nupath = requirements.nupathMap[code] || []
     nupath.forEach(n => satisfiedNupath.add(n))
   }
 
-  // Sort: non-nupath ALL requirements first, then ONE_OF, then NUpath, then MIN_CREDITS
   const sorted = [...unsatisfied].sort((a, b) => {
     const priority = (r) => {
       if (r.type === 'ALL') return 0
@@ -263,7 +270,6 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
       let best = null
 
       if (req.isNupath) {
-        // Pick the course that satisfies the most unsatisfied NUpath categories
         const unsatisfiedNupathCodes = requirements.groups
           .filter(g => g.is_nupath)
           .map(g => getNupathCode(g.name))
@@ -325,7 +331,6 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
     }
   }
 
-  // Add concentration courses
   if (requirements.concentrationCourses.length > 0) {
     const byGroup = {}
     for (const cc of requirements.concentrationCourses) {
@@ -410,11 +415,66 @@ function addCorequisites(courses, coreqMap, allDoneCodes, allCoursesMap) {
   return result
 }
 
-function packSemesters(orderedCourses, student, completedCodes, requirements) {
+function calculateGraduation(completedCredits, numCoops, startYear) {
+  const TOTAL_CREDITS = 134
+  const remaining = Math.max(0, TOTAL_CREDITS - completedCredits)
+
+  // Co-op 1: Spring year+2 + Summer A year+2
+  // Co-op 2: Spring year+3 + Summer A year+3
+  const coopSemesters = new Set([
+    `Spring ${startYear + 2}`,
+    `Summer A ${startYear + 2}`,
+    `Spring ${startYear + 3}`,
+    `Summer A ${startYear + 3}`
+  ])
+
+  let creditsAccumulated = 0
+  let currentSeason = 'Fall'
+  let currentYear = startYear
+  let lastFallOrSpring = `Spring ${startYear + 4}`
+
+  for (let i = 0; i < 24; i++) {
+    const labels = currentSeason === 'Fall'
+      ? [`Fall ${currentYear}`]
+      : [`Spring ${currentYear}`, `Summer A ${currentYear}`, `Summer B ${currentYear}`]
+
+    for (const label of labels) {
+      if (coopSemesters.has(label)) continue
+      const isSummer = label.includes('Summer')
+      creditsAccumulated += isSummer ? 7 : 15
+      if (!isSummer) lastFallOrSpring = label
+
+      if (creditsAccumulated >= remaining) {
+        // Enforce minimum graduation — co-op 2 ends Summer A year+3
+        // so earliest possible graduation is Fall year+3
+        const minGradYear = startYear + 3
+        const gradYear = parseInt(lastFallOrSpring.split(' ')[1])
+        const gradSeason = lastFallOrSpring.split(' ')[0]
+
+        if (gradYear < minGradYear ||
+          (gradYear === minGradYear && gradSeason === 'Spring')) {
+          return `Fall ${minGradYear}`
+        }
+        return lastFallOrSpring
+      }
+    }
+
+    if (currentSeason === 'Fall') {
+      currentSeason = 'Spring'
+      currentYear += 1
+    } else {
+      currentSeason = 'Fall'
+    }
+  }
+
+  return `Spring ${startYear + 4}`
+}
+
+function packSemesters(orderedCourses, student, completedCodes, requirements, targetGraduation, startYear) {
   const MAX_CREDITS = 19
   const SUMMER_MAX = 9
   const placed = new Map()
-  const semesters = generateSemesters(student.target_graduation, student.catalog_year)
+  const semesters = generateSemesters(targetGraduation, startYear)
   const semesterPlans = semesters.map(s => ({
     semester: s.label,
     type: s.type,
@@ -451,7 +511,6 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
       }
     }
 
-    // Calculate coreq credits to reserve space
     const coreqCredits = (requirements.corequisites[course.code] || [])
       .reduce((sum, coreqCode) => {
         const coreqData = requirements.allCoursesMap[coreqCode] || {}
@@ -460,23 +519,14 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
 
     const courseCredits = parseFloat(course.credits || 0)
     const totalCredits = courseCredits + coreqCredits
-
-    // Determine if this is an upper division course (3000+)
     const courseNum = parseInt(course.code.replace(/[^0-9]/g, ''))
     const isUpperDiv = courseNum >= 3000
 
     for (let i = earliestSemester; i < semesterPlans.length; i++) {
       if (semesterPlans[i].type === 'coop') continue
       const maxForSem = semesterPlans[i].type === 'summer' ? SUMMER_MAX : MAX_CREDITS
-
-      // Ramp up difficulty — limit upper division in early semesters
-      // Semester 0 = first semester, allow max 1 upper div
-      // Semester 1-2 = allow max 2 upper div
-      // After that = no limit
-      const semesterIndex = semesters.findIndex(s => s.label === semesterPlans[i].semester)
-      const upperDivLimit = semesterIndex === 0 ? 1 : semesterIndex <= 2 ? 2 : 99
+      const upperDivLimit = i === 0 ? 1 : i <= 2 ? 2 : 99
       if (isUpperDiv && semesterPlans[i].upperDivCount >= upperDivLimit) continue
-
       if (semesterPlans[i].credits + totalCredits <= maxForSem) {
         semesterPlans[i].courses.push(course)
         semesterPlans[i].credits += courseCredits
@@ -502,25 +552,21 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
     .map(({ upperDivCount, ...s }) => s)
 }
 
-function generateSemesters(targetGraduation, catalogYear) {
+function generateSemesters(targetGraduation, startYear) {
   const semesters = []
-  const now = new Date()
-  const currentMonth = now.getMonth()
-  const currentYear = now.getFullYear()
-  let year = currentYear
-  let season = currentMonth < 7 ? 'Fall' : 'Spring'
-  if (season === 'Spring') year += 1
+  let year = startYear
+  let season = 'Fall'
 
-  const startYear = year
-
+  // Co-op 1: Spring year+2 + Summer A year+2
+  // Co-op 2: Spring year+3 + Summer A year+3
   const coopSemesters = new Set([
-    `Spring ${startYear + 1}`,
-    `Summer A ${startYear + 2}`,
     `Spring ${startYear + 2}`,
+    `Summer A ${startYear + 2}`,
+    `Spring ${startYear + 3}`,
     `Summer A ${startYear + 3}`
   ])
 
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < 20; i++) {
     const labels = season === 'Fall'
       ? [`Fall ${year}`]
       : [`Spring ${year}`, `Summer A ${year}`, `Summer B ${year}`]
