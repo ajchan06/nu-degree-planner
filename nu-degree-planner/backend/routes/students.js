@@ -3,7 +3,6 @@ import supabase from '../supabase.js'
 
 const router = express.Router()
 
-// POST /students — create a new student
 router.post('/', async (req, res) => {
   try {
     const {
@@ -25,7 +24,7 @@ router.post('/', async (req, res) => {
 
     const { data, error } = await supabase
       .from('students')
-      .insert([{
+      .upsert([{
         email,
         name,
         major_code,
@@ -34,23 +33,23 @@ router.post('/', async (req, res) => {
         start_year,
         num_coops,
         target_graduation
-      }])
+      }], { onConflict: 'email' })
       .select()
       .single()
 
-    if (error) {
-      if (error.code === '23505') {
-        return res.status(409).json({ error: 'An account with this email already exists.' })
-      }
-      throw error
-    }
+    if (error) throw error
+
+    await supabase
+      .from('student_courses')
+      .delete()
+      .eq('student_id', data.id)
+
     res.status(201).json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// GET /students/:id — get a student with their courses
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params
@@ -80,7 +79,6 @@ router.get('/:id', async (req, res) => {
   }
 })
 
-// POST /students/:id/courses — add a course to a student
 router.post('/:id/courses', async (req, res) => {
   try {
     const { id } = req.params
@@ -122,7 +120,6 @@ router.post('/:id/courses', async (req, res) => {
   }
 })
 
-// PATCH /students/:id/courses/:courseCode — update a course status
 router.patch('/:id/courses/:courseCode', async (req, res) => {
   try {
     const { id, courseCode } = req.params
@@ -143,7 +140,6 @@ router.patch('/:id/courses/:courseCode', async (req, res) => {
   }
 })
 
-// DELETE /students/:id/courses/:courseCode — remove a course
 router.delete('/:id/courses/:courseCode', async (req, res) => {
   try {
     const { id, courseCode } = req.params

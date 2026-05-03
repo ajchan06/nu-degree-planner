@@ -17,17 +17,17 @@ const CONCENTRATIONS = {
 }
 
 const AP_EXAMS = [
-  { exam: 'AP Calculus AB', course: 'MATH1341', credits: 4 },
-  { exam: 'AP Calculus BC', course: 'MATH1341', credits: 4 },
-  { exam: 'AP Statistics', course: 'MATH2280', credits: 4 },
-  { exam: 'AP Computer Science A', course: 'CS2000', credits: 4 },
-  { exam: 'AP Computer Science Principles', course: 'CS1800', credits: 4 },
-  { exam: 'AP Biology', course: 'BIOL1111', credits: 4 },
-  { exam: 'AP Chemistry', course: 'CHEM1161', credits: 4 },
-  { exam: 'AP Physics 1', course: 'PHYS1145', credits: 4 },
-  { exam: 'AP Physics 2', course: 'PHYS1147', credits: 4 },
-  { exam: 'AP English Language', course: 'ENGW1111', credits: 4 },
-  { exam: 'AP English Literature', course: 'ENGW1111', credits: 4 },
+  { exam: 'AP Calculus AB', courses: [{ code: 'MATH1341', credits: 4 }] },
+  { exam: 'AP Calculus BC', courses: [{ code: 'MATH1341', credits: 4 }, { code: 'MATH1342', credits: 4 }] },
+  { exam: 'AP Statistics', courses: [{ code: 'MATH2280', credits: 4 }] },
+  { exam: 'AP Computer Science A', courses: [{ code: 'CS2000', credits: 4 }] },
+  { exam: 'AP Computer Science Principles', courses: [{ code: 'CS1800', credits: 4 }] },
+  { exam: 'AP Biology', courses: [{ code: 'BIOL1111', credits: 4 }, { code: 'BIOL1113', credits: 4 }] },
+  { exam: 'AP Chemistry', courses: [{ code: 'CHEM1161', credits: 4 }] },
+  { exam: 'AP Physics 1', courses: [{ code: 'PHYS1145', credits: 4 }] },
+  { exam: 'AP Physics 2', courses: [{ code: 'PHYS1147', credits: 4 }] },
+  { exam: 'AP English Language', courses: [{ code: 'ENGW1111', credits: 4 }] },
+  { exam: 'AP English Literature', courses: [{ code: 'ENGW1111', credits: 4 }] },
 ]
 
 const CURRENT_YEAR = new Date().getFullYear()
@@ -63,7 +63,20 @@ export default function Onboarding() {
       if (exists) {
         return { ...prev, ap_credits: prev.ap_credits.filter(a => a.exam !== exam.exam) }
       } else {
-        return { ...prev, ap_credits: [...prev.ap_credits, exam] }
+        let updated = [...prev.ap_credits]
+        if (exam.exam === 'AP Calculus BC') {
+          updated = updated.filter(a => a.exam !== 'AP Calculus AB')
+        }
+        if (exam.exam === 'AP Calculus AB') {
+          updated = updated.filter(a => a.exam !== 'AP Calculus BC')
+        }
+        if (exam.exam === 'AP English Language') {
+          updated = updated.filter(a => a.exam !== 'AP English Literature')
+        }
+        if (exam.exam === 'AP English Literature') {
+          updated = updated.filter(a => a.exam !== 'AP English Language')
+        }
+        return { ...prev, ap_credits: [...updated, exam] }
       }
     })
   }
@@ -91,7 +104,6 @@ export default function Onboarding() {
     setLoading(true)
     setError(null)
     try {
-      // Create student
       const studentRes = await axios.post('/api/students', {
         name: form.name,
         email: form.email,
@@ -104,17 +116,17 @@ export default function Onboarding() {
       })
       const studentId = studentRes.data.id
 
-      // Add AP credits
       for (const ap of form.ap_credits) {
-        await axios.post(`/api/students/${studentId}/courses`, {
-          course_code: ap.course,
-          status: 'ap',
-          source: 'ap',
-          credits: ap.credits
-        })
+        for (const course of ap.courses) {
+          await axios.post(`/api/students/${studentId}/courses`, {
+            course_code: course.code,
+            status: 'ap',
+            source: 'ap',
+            credits: course.credits
+          })
+        }
       }
 
-      // Add completed courses
       for (const course of form.completed_courses) {
         await axios.post(`/api/students/${studentId}/courses`, {
           course_code: course.code,
@@ -133,13 +145,11 @@ export default function Onboarding() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <div className="bg-red-700 text-white py-6 px-8">
         <h1 className="text-2xl font-bold">NU Degree Planner</h1>
         <p className="text-red-200 text-sm mt-1">Generate your personalized degree plan</p>
       </div>
 
-      {/* Progress */}
       <div className="flex border-b bg-white">
         {['Your Info', 'Major', 'AP Credits', 'Completed Courses', 'Review'].map((label, i) => (
           <button
@@ -160,7 +170,6 @@ export default function Onboarding() {
 
       <div className="max-w-2xl mx-auto py-10 px-6">
 
-        {/* Step 1: Your Info */}
         {step === 1 && (
           <div className="space-y-6">
             <h2 className="text-xl font-semibold text-gray-800">Tell us about yourself</h2>
@@ -217,7 +226,6 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* Step 2: Major */}
         {step === 2 && (
           <div className="space-y-6">
             <h2 className="text-xl font-semibold text-gray-800">Choose your major</h2>
@@ -263,7 +271,6 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* Step 3: AP Credits */}
         {step === 3 && (
           <div className="space-y-4">
             <h2 className="text-xl font-semibold text-gray-800">AP Credits</h2>
@@ -281,7 +288,9 @@ export default function Onboarding() {
                 >
                   <div>
                     <div className="font-medium text-gray-800">{ap.exam}</div>
-                    <div className="text-sm text-gray-500">Counts as {ap.course} • {ap.credits} credits</div>
+                    <div className="text-sm text-gray-500">
+                      {ap.courses.map(c => c.code).join(' + ')} · {ap.courses.reduce((s, c) => s + c.credits, 0)} credits
+                    </div>
                   </div>
                   {form.ap_credits.find(a => a.exam === ap.exam) && (
                     <span className="text-red-600 font-bold">✓</span>
@@ -292,7 +301,6 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* Step 4: Completed Courses */}
         {step === 4 && (
           <div className="space-y-4">
             <h2 className="text-xl font-semibold text-gray-800">Completed Courses</h2>
@@ -327,7 +335,7 @@ export default function Onboarding() {
                 <div key={c.code} className="flex justify-between items-center px-4 py-3 bg-white border border-gray-200 rounded-lg">
                   <div>
                     <span className="font-medium text-gray-800">{c.code}</span>
-                    <span className="text-gray-500 text-sm ml-2">• {c.credits} credits</span>
+                    <span className="text-gray-500 text-sm ml-2">· {c.credits} credits</span>
                   </div>
                   <button
                     onClick={() => removeCourse(c.code)}
@@ -344,7 +352,6 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* Step 5: Review */}
         {step === 5 && (
           <div className="space-y-6">
             <h2 className="text-xl font-semibold text-gray-800">Review your information</h2>
@@ -399,7 +406,6 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* Navigation */}
         <div className="flex justify-between mt-10">
           {step > 1 ? (
             <button

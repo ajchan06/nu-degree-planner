@@ -25,7 +25,7 @@ export default function Plan() {
   if (loading) return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="text-center">
-        <div className="text-red-600 text-4xl mb-4">⏳</div>
+        <div className="text-4xl mb-4">⏳</div>
         <p className="text-gray-600 font-medium">Generating your degree plan...</p>
         <p className="text-gray-400 text-sm mt-1">This may take a few seconds</p>
       </div>
@@ -51,13 +51,18 @@ export default function Plan() {
 
   const plannedCredits = plan
     .flatMap(s => s.courses)
+    .filter(c => !c.is_elective && c.code !== 'COOP3945')
     .reduce((sum, c) => sum + parseFloat(c.credits || 0), 0)
 
-  const totalCredits = completedCredits + plannedCredits
+  const electiveCredits = plan
+    .flatMap(s => s.courses)
+    .filter(c => c.is_elective)
+    .reduce((sum, c) => sum + parseFloat(c.credits || 0), 0)
+
+  const totalCredits = completedCredits + plannedCredits + electiveCredits
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <div className="bg-red-700 text-white py-5 px-8 flex justify-between items-center">
         <div>
           <h1 className="text-xl font-bold">NU Degree Planner</h1>
@@ -69,7 +74,6 @@ export default function Plan() {
         </div>
       </div>
 
-      {/* Credit summary bar */}
       <div className="bg-white border-b px-8 py-4 flex gap-8">
         <div>
           <div className="text-2xl font-bold text-gray-800">{Math.round(totalCredits)}</div>
@@ -84,12 +88,15 @@ export default function Plan() {
           <div className="text-xs text-gray-500">Planned</div>
         </div>
         <div>
+          <div className="text-2xl font-bold text-purple-500">{Math.round(electiveCredits)}</div>
+          <div className="text-xs text-gray-500">Electives</div>
+        </div>
+        <div>
           <div className="text-2xl font-bold text-gray-400">{Math.max(0, Math.round(134 - totalCredits))}</div>
           <div className="text-xs text-gray-500">Remaining</div>
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="bg-white border-b px-8 flex gap-6">
         {['plan', 'requirements'].map(tab => (
           <button
@@ -107,8 +114,6 @@ export default function Plan() {
       </div>
 
       <div className="max-w-5xl mx-auto py-8 px-6">
-
-        {/* Plan Tab */}
         {activeTab === 'plan' && (
           <div className="space-y-6">
             {plan.map((semester, i) => (
@@ -117,7 +122,6 @@ export default function Plan() {
           </div>
         )}
 
-        {/* Requirements Tab */}
         {activeTab === 'requirements' && (
           <div className="space-y-3">
             {summary.map((req, i) => (
@@ -125,7 +129,6 @@ export default function Plan() {
             ))}
           </div>
         )}
-
       </div>
     </div>
   )
@@ -168,16 +171,22 @@ function SemesterCard({ semester }) {
 function CourseRow({ course }) {
   const isLab = course.is_lab || course._coreqOf
   const isCoop = course.code === 'COOP3945'
+  const isElective = course.is_elective
 
   if (isCoop) return null
 
   return (
-    <div className={`px-5 py-3 flex justify-between items-center ${isLab ? 'bg-gray-50' : ''}`}>
+    <div className={`px-5 py-3 flex justify-between items-center ${
+      isElective ? 'bg-purple-50' : isLab ? 'bg-gray-50' : ''
+    }`}>
       <div className="flex items-center gap-3">
         {isLab && <span className="text-xs bg-gray-200 text-gray-600 px-2 py-0.5 rounded">Lab</span>}
+        {isElective && <span className="text-xs bg-purple-200 text-purple-700 px-2 py-0.5 rounded">Elective</span>}
         <div>
-          <span className="font-mono text-sm font-medium text-red-700">{course.code}</span>
-          <span className="text-gray-700 text-sm ml-2">{course.title}</span>
+          {!isElective && (
+            <span className="font-mono text-sm font-medium text-red-700">{course.code} </span>
+          )}
+          <span className="text-gray-700 text-sm">{course.title}</span>
         </div>
       </div>
       <div className="text-sm text-gray-400">{course.credits} cr</div>
@@ -209,6 +218,11 @@ function RequirementRow({ req }) {
           <span className={`font-medium ${statusColor[req.status]}`}>
             {statusIcon[req.status]} {req.name}
           </span>
+          {req.name === 'General Electives' && req.credits_needed > 0 && (
+            <div className="text-xs text-red-500 mt-1">
+              {req.credits_needed} more credits needed — choose any courses with your advisor
+            </div>
+          )}
           {req.completed?.length > 0 && (
             <div className="text-xs text-green-600 mt-1">
               Completed: {req.completed.join(', ')}
