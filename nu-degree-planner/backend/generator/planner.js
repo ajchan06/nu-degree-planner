@@ -226,7 +226,22 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
   const selected = new Map()
   const satisfiedNupath = new Set()
 
-  const sorted = [...unsatisfied].sort((a, b) => a.options.length - b.options.length)
+  // Initialize satisfiedNupath from already completed courses
+  for (const code of allDoneCodes) {
+    const nupath = requirements.nupathMap[code] || []
+    nupath.forEach(n => satisfiedNupath.add(n))
+  }
+
+  // Sort: non-nupath ALL requirements first, then ONE_OF, then NUpath, then MIN_CREDITS
+  const sorted = [...unsatisfied].sort((a, b) => {
+    const priority = (r) => {
+      if (r.type === 'ALL') return 0
+      if (r.type === 'ONE_OF' && !r.isNupath) return 1
+      if (r.type === 'ONE_OF' && r.isNupath) return 2
+      return 3
+    }
+    return priority(a) - priority(b)
+  })
 
   for (const req of sorted) {
     if (req.type === 'ALL') {
@@ -244,9 +259,32 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
 
     if (req.type === 'ONE_OF') {
       if (req.isNupath && req.nupathCode && satisfiedNupath.has(req.nupathCode)) continue
-      const best = req.options.find(c =>
-        !allDoneCodes.has(c.code) && !selected.has(c.code) && !c.is_lab
-      )
+
+      let best = null
+
+      if (req.isNupath) {
+        // Pick the course that satisfies the most unsatisfied NUpath categories
+        const unsatisfiedNupathCodes = requirements.groups
+          .filter(g => g.is_nupath)
+          .map(g => getNupathCode(g.name))
+          .filter(code => code && !satisfiedNupath.has(code))
+
+        let bestScore = -1
+        for (const c of req.options) {
+          if (allDoneCodes.has(c.code) || selected.has(c.code) || c.is_lab) continue
+          const nupath = requirements.nupathMap[c.code] || []
+          const score = nupath.filter(n => unsatisfiedNupathCodes.includes(n)).length
+          if (score > bestScore) {
+            bestScore = score
+            best = c
+          }
+        }
+      } else {
+        best = req.options.find(c =>
+          !allDoneCodes.has(c.code) && !selected.has(c.code) && !c.is_lab
+        )
+      }
+
       if (best) {
         selected.set(best.code, best)
         const nupath = requirements.nupathMap[best.code] || []
@@ -256,14 +294,33 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
 
     if (req.type === 'MIN_CREDITS') {
       let creditsAdded = 0
+      let scienceCoursesAdded = 0
+
+      const completedInReq = req.options
+        .filter(c => allDoneCodes.has(c.code) && !c.is_lab)
+      const completedCredits = completedInReq
+        .reduce((sum, c) => sum + parseFloat(c.credits || 0), 0)
+
+      const isScienceReq = req.group.name === 'Science Requirement'
+      const sciencePrefixes = ['BIOL', 'CHEM', 'ENVR', 'PHYS']
+      const completedScienceCourses = completedInReq
+        .filter(c => sciencePrefixes.some(p => c.code.startsWith(p))).length
+      const minScienceCourses = isScienceReq
+        ? Math.max(0, 2 - completedScienceCourses)
+        : 0
+
+      creditsAdded = completedCredits
+
       for (const course of req.options) {
-        if (creditsAdded >= req.creditsNeeded) break
-        if (!allDoneCodes.has(course.code) && !selected.has(course.code) && !course.is_lab) {
-          selected.set(course.code, course)
-          creditsAdded += parseFloat(course.credits)
-          const nupath = requirements.nupathMap[course.code] || []
-          nupath.forEach(n => satisfiedNupath.add(n))
-        }
+        if (creditsAdded >= req.creditsNeeded && scienceCoursesAdded >= minScienceCourses) break
+        if (allDoneCodes.has(course.code) || selected.has(course.code) || course.is_lab) continue
+        const isScienceCourse = sciencePrefixes.some(p => course.code.startsWith(p))
+        if (creditsAdded >= req.creditsNeeded && isScienceReq && !isScienceCourse) continue
+        selected.set(course.code, course)
+        creditsAdded += parseFloat(course.credits)
+        if (isScienceCourse) scienceCoursesAdded++
+        const nupath = requirements.nupathMap[course.code] || []
+        nupath.forEach(n => satisfiedNupath.add(n))
       }
     }
   }
@@ -362,7 +419,8 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
     semester: s.label,
     type: s.type,
     courses: [],
-    credits: 0
+    credits: 0,
+    upperDivCount: 0
   }))
 
   for (let i = 0; i < semesterPlans.length; i++) {
@@ -393,12 +451,36 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
       }
     }
 
+    // Calculate coreq credits to reserve space
+    const coreqCredits = (requirements.corequisites[course.code] || [])
+      .reduce((sum, coreqCode) => {
+        const coreqData = requirements.allCoursesMap[coreqCode] || {}
+        return sum + parseFloat(coreqData.credits || 0)
+      }, 0)
+
+    const courseCredits = parseFloat(course.credits || 0)
+    const totalCredits = courseCredits + coreqCredits
+
+    // Determine if this is an upper division course (3000+)
+    const courseNum = parseInt(course.code.replace(/[^0-9]/g, ''))
+    const isUpperDiv = courseNum >= 3000
+
     for (let i = earliestSemester; i < semesterPlans.length; i++) {
       if (semesterPlans[i].type === 'coop') continue
       const maxForSem = semesterPlans[i].type === 'summer' ? SUMMER_MAX : MAX_CREDITS
-      if (semesterPlans[i].credits + parseFloat(course.credits || 0) <= maxForSem) {
+
+      // Ramp up difficulty — limit upper division in early semesters
+      // Semester 0 = first semester, allow max 1 upper div
+      // Semester 1-2 = allow max 2 upper div
+      // After that = no limit
+      const semesterIndex = semesters.findIndex(s => s.label === semesterPlans[i].semester)
+      const upperDivLimit = semesterIndex === 0 ? 1 : semesterIndex <= 2 ? 2 : 99
+      if (isUpperDiv && semesterPlans[i].upperDivCount >= upperDivLimit) continue
+
+      if (semesterPlans[i].credits + totalCredits <= maxForSem) {
         semesterPlans[i].courses.push(course)
-        semesterPlans[i].credits += parseFloat(course.credits || 0)
+        semesterPlans[i].credits += courseCredits
+        if (isUpperDiv) semesterPlans[i].upperDivCount++
         placed.set(course.code, i)
         break
       }
@@ -415,7 +497,9 @@ function packSemesters(orderedCourses, student, completedCodes, requirements) {
     }
   }
 
-  return semesterPlans.filter(s => s.courses.length > 0 || s.type === 'coop')
+  return semesterPlans
+    .filter(s => s.courses.length > 0 || s.type === 'coop')
+    .map(({ upperDivCount, ...s }) => s)
 }
 
 function generateSemesters(targetGraduation, catalogYear) {
