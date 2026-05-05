@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 
@@ -30,6 +30,13 @@ const AP_EXAMS = [
   { exam: 'AP English Literature', courses: [{ code: 'ENGW1111', credits: 4 }] },
 ]
 
+const VALID_PREFIXES = new Set([
+  'CS', 'CY', 'DS', 'IS', 'MATH', 'PHYS', 'BIOL', 'CHEM',
+  'ENVR', 'ENGW', 'COMM', 'THTR', 'PHIL', 'HIST', 'AFCS',
+  'SOCL', 'EECE', 'INSH', 'JRNL', 'LPSC', 'CRIM', 'POLS',
+  'ECON', 'PSYC', 'MGSC', 'MKTG', 'HINF'
+])
+
 const CURRENT_YEAR = new Date().getFullYear()
 const START_YEARS = [CURRENT_YEAR - 3, CURRENT_YEAR - 2, CURRENT_YEAR - 1, CURRENT_YEAR, CURRENT_YEAR + 1]
 
@@ -46,12 +53,57 @@ export default function Onboarding() {
     concentration: 'Systems',
     start_year: CURRENT_YEAR,
     num_coops: 2,
+    coop_pattern: 'spring',
     ap_credits: [],
     completed_courses: []
   })
 
   const [courseInput, setCourseInput] = useState('')
   const [courseCredits, setCourseCredits] = useState(4)
+  const [courseValidation, setCourseValidation] = useState('idle')
+  const [courseCache, setCourseCache] = useState({})
+  const [courseSuggestion, setCourseSuggestion] = useState(null)
+
+  useEffect(() => {
+    const code = courseInput.trim().toUpperCase()
+    if (!code) {
+      setCourseValidation('idle')
+      setCourseSuggestion(null)
+      return
+    }
+
+    const prefix = code.replace(/[0-9]/g, '')
+    if (!VALID_PREFIXES.has(prefix)) {
+      setCourseValidation('invalid')
+      setCourseSuggestion(null)
+      return
+    }
+
+    if (!/[0-9]/.test(code)) {
+      setCourseValidation('idle')
+      setCourseSuggestion(null)
+      return
+    }
+
+    if (courseCache[prefix]) {
+      const match = courseCache[prefix].find(c => c.code === code)
+      setCourseValidation(match ? 'valid' : 'invalid')
+      setCourseSuggestion(match || null)
+      return
+    }
+
+    axios.get(`/api/courses?prefix=${prefix}`)
+      .then(res => {
+        setCourseCache(prev => ({ ...prev, [prefix]: res.data }))
+        const match = res.data.find(c => c.code === code)
+        setCourseValidation(match ? 'valid' : 'invalid')
+        setCourseSuggestion(match || null)
+      })
+      .catch(() => {
+        setCourseValidation('idle')
+        setCourseSuggestion(null)
+      })
+  }, [courseInput])
 
   function updateForm(field, value) {
     setForm(prev => ({ ...prev, [field]: value }))
@@ -64,33 +116,32 @@ export default function Onboarding() {
         return { ...prev, ap_credits: prev.ap_credits.filter(a => a.exam !== exam.exam) }
       } else {
         let updated = [...prev.ap_credits]
-        if (exam.exam === 'AP Calculus BC') {
-          updated = updated.filter(a => a.exam !== 'AP Calculus AB')
-        }
-        if (exam.exam === 'AP Calculus AB') {
-          updated = updated.filter(a => a.exam !== 'AP Calculus BC')
-        }
-        if (exam.exam === 'AP English Language') {
-          updated = updated.filter(a => a.exam !== 'AP English Literature')
-        }
-        if (exam.exam === 'AP English Literature') {
-          updated = updated.filter(a => a.exam !== 'AP English Language')
-        }
+        if (exam.exam === 'AP Calculus BC') updated = updated.filter(a => a.exam !== 'AP Calculus AB')
+        if (exam.exam === 'AP Calculus AB') updated = updated.filter(a => a.exam !== 'AP Calculus BC')
+        if (exam.exam === 'AP English Language') updated = updated.filter(a => a.exam !== 'AP English Literature')
+        if (exam.exam === 'AP English Literature') updated = updated.filter(a => a.exam !== 'AP English Language')
         return { ...prev, ap_credits: [...updated, exam] }
       }
     })
   }
 
   function addCourse() {
+    if (courseValidation !== 'valid') return
     const code = courseInput.trim().toUpperCase()
     if (!code) return
     if (form.completed_courses.find(c => c.code === code)) return
     setForm(prev => ({
       ...prev,
-      completed_courses: [...prev.completed_courses, { code, credits: courseCredits, source: 'taken' }]
+      completed_courses: [...prev.completed_courses, {
+        code,
+        credits: courseSuggestion?.credits || courseCredits,
+        source: 'taken'
+      }]
     }))
     setCourseInput('')
     setCourseCredits(4)
+    setCourseValidation('idle')
+    setCourseSuggestion(null)
   }
 
   function removeCourse(code) {
@@ -112,6 +163,7 @@ export default function Onboarding() {
         catalog_year: form.start_year,
         start_year: form.start_year,
         num_coops: form.num_coops,
+        coop_pattern: form.coop_pattern,
         target_graduation: null
       })
       const studentId = studentRes.data.id
@@ -223,6 +275,34 @@ export default function Onboarding() {
                 ))}
               </div>
             </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Co-op Pattern</label>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => updateForm('coop_pattern', 'spring')}
+                  className={`flex-1 py-3 rounded-lg border-2 font-medium transition-colors ${
+                    form.coop_pattern === 'spring'
+                      ? 'border-red-600 bg-red-50 text-red-700'
+                      : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                  }`}
+                >
+                  <div>Spring</div>
+                  <div className="text-xs font-normal mt-1">Jan – June</div>
+                </button>
+                <button
+                  onClick={() => updateForm('coop_pattern', 'fall')}
+                  className={`flex-1 py-3 rounded-lg border-2 font-medium transition-colors ${
+                    form.coop_pattern === 'fall'
+                      ? 'border-red-600 bg-red-50 text-red-700'
+                      : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                  }`}
+                >
+                  <div>Fall</div>
+                  <div className="text-xs font-normal mt-1">July – Dec</div>
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">This determines which semesters you'll be on co-op</p>
+            </div>
           </div>
         )}
 
@@ -306,31 +386,41 @@ export default function Onboarding() {
             <h2 className="text-xl font-semibold text-gray-800">Completed Courses</h2>
             <p className="text-gray-500 text-sm">Enter courses you've already taken at Northeastern or transferred in.</p>
             <div className="flex gap-2">
-              <input
-                type="text"
-                value={courseInput}
-                onChange={e => setCourseInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && addCourse()}
-                className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
-                placeholder="e.g. CS1800"
-              />
-              <select
-                value={courseCredits}
-                onChange={e => setCourseCredits(parseInt(e.target.value))}
-                className="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
-              >
-                {[1, 2, 3, 4, 5].map(n => (
-                  <option key={n} value={n}>{n} cr</option>
-                ))}
-              </select>
+              <div className="flex-1 relative">
+                <input
+                  type="text"
+                  value={courseInput}
+                  onChange={e => setCourseInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addCourse()}
+                  className={`w-full border-2 rounded-lg px-4 py-2 focus:outline-none transition-colors ${
+                    courseValidation === 'valid'
+                      ? 'border-green-500 focus:border-green-500'
+                      : courseValidation === 'invalid'
+                      ? 'border-red-400 focus:border-red-400'
+                      : 'border-gray-300 focus:border-red-500'
+                  }`}
+                  placeholder="e.g. CS1800"
+                />
+                {courseValidation === 'valid' && courseSuggestion && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-green-200 rounded-lg px-3 py-2 text-sm text-gray-600 shadow-sm z-10">
+                    ✓ {courseSuggestion.title} · {courseSuggestion.credits} credits
+                  </div>
+                )}
+                {courseValidation === 'invalid' && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-red-200 rounded-lg px-3 py-2 text-sm text-red-500 shadow-sm z-10">
+                    Course not found in Northeastern catalog
+                  </div>
+                )}
+              </div>
               <button
                 onClick={addCourse}
-                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors"
+                disabled={courseValidation !== 'valid'}
+                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Add
               </button>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-2 mt-6">
               {form.completed_courses.map(c => (
                 <div key={c.code} className="flex justify-between items-center px-4 py-3 bg-white border border-gray-200 rounded-lg">
                   <div>
@@ -374,7 +464,7 @@ export default function Onboarding() {
               </div>
               <div className="px-5 py-4">
                 <div className="text-sm text-gray-500">Co-ops</div>
-                <div className="font-medium text-gray-800">{form.num_coops}</div>
+                <div className="font-medium text-gray-800">{form.num_coops} · {form.coop_pattern === 'spring' ? 'Spring pattern (Jan–June)' : 'Fall pattern (July–Dec)'}</div>
               </div>
               <div className="px-5 py-4">
                 <div className="text-sm text-gray-500">AP Credits</div>

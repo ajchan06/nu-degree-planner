@@ -5,11 +5,17 @@ const router = express.Router()
 
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { prefix } = req.query
+    let query = supabase
       .from('courses')
-      .select('*')
+      .select('code, title, credits, is_lab')
       .order('code')
 
+    if (prefix) {
+      query = query.ilike('code', `${prefix}%`)
+    }
+
+    const { data, error } = await query
     if (error) throw error
     res.json(data)
   } catch (err) {

@@ -36,7 +36,13 @@ export default function Plan() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="text-center">
         <p className="text-red-600 font-medium">{error}</p>
-        <button onClick={() => navigate('/onboarding')} className="mt-4 text-sm text-gray-500 underline">
+        <button
+          onClick={() => {
+            localStorage.removeItem('studentId')
+            navigate('/onboarding')
+          }}
+          className="mt-4 text-sm text-gray-500 underline"
+        >
           Start over
         </button>
       </div>
@@ -68,9 +74,20 @@ export default function Plan() {
           <h1 className="text-xl font-bold">NU Degree Planner</h1>
           <p className="text-red-200 text-sm">{student.name} · {student.major_code} {student.concentration}</p>
         </div>
-        <div className="text-right">
-          <div className="text-sm text-red-200">Estimated Graduation</div>
-          <div className="font-bold">{targetGraduation}</div>
+        <div className="flex items-center gap-6">
+          <div className="text-right">
+            <div className="text-sm text-red-200">Estimated Graduation</div>
+            <div className="font-bold">{targetGraduation}</div>
+          </div>
+          <button
+            onClick={() => {
+              localStorage.removeItem('studentId')
+              navigate('/onboarding')
+            }}
+            className="text-red-200 text-sm hover:text-white transition-colors border border-red-400 px-3 py-1 rounded-lg"
+          >
+            Start Over
+          </button>
         </div>
       </div>
 
@@ -169,19 +186,36 @@ function SemesterCard({ semester }) {
 }
 
 function CourseRow({ course }) {
-  const isLab = course.is_lab || course._coreqOf
   const isCoop = course.code === 'COOP3945'
   const isElective = course.is_elective
+  const courseType = course.course_type
+  const isLab = courseType === 'lab'
+  const isSeminar = courseType === 'seminar'
+  const isRecitation = courseType === 'recitation'
+  const isSupplementary = isLab || isSeminar || isRecitation
 
   if (isCoop) return null
 
+  const typeLabel = isLab ? 'Lab' : isSeminar ? 'Seminar' : isRecitation ? 'Recitation' : null
+  const typeBg = isLab
+    ? 'bg-gray-200 text-gray-600'
+    : isSeminar
+    ? 'bg-blue-100 text-blue-700'
+    : isRecitation
+    ? 'bg-orange-100 text-orange-700'
+    : ''
+
   return (
     <div className={`px-5 py-3 flex justify-between items-center ${
-      isElective ? 'bg-purple-50' : isLab ? 'bg-gray-50' : ''
+      isElective ? 'bg-purple-50' : isSupplementary ? 'bg-gray-50' : ''
     }`}>
       <div className="flex items-center gap-3">
-        {isLab && <span className="text-xs bg-gray-200 text-gray-600 px-2 py-0.5 rounded">Lab</span>}
-        {isElective && <span className="text-xs bg-purple-200 text-purple-700 px-2 py-0.5 rounded">Elective</span>}
+        {typeLabel && (
+          <span className={`text-xs px-2 py-0.5 rounded ${typeBg}`}>{typeLabel}</span>
+        )}
+        {isElective && (
+          <span className="text-xs bg-purple-200 text-purple-700 px-2 py-0.5 rounded">Elective</span>
+        )}
         <div>
           {!isElective && (
             <span className="font-mono text-sm font-medium text-red-700">{course.code} </span>
