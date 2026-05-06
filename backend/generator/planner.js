@@ -16,25 +16,17 @@ export async function generatePlan(studentId) {
     .reduce((sum, c) => sum + parseFloat(c.credits || 0), 0)
 
   const startYear = student.start_year || new Date().getFullYear()
+  const startSemester = student.start_semester || 'Fall'
   const numCoops = student.num_coops || 2
   const coopPattern = student.coop_pattern || 'spring'
 
-  const now = new Date()
-  const currentMonth = now.getMonth()
-  const currentYear = now.getFullYear()
-
-  let firstSemester
-  if (startYear < currentYear || (startYear === currentYear && currentMonth >= 7)) {
-    firstSemester = `Fall ${startYear}`
-  } else {
-    const firstSemYear = currentMonth < 7 ? currentYear : currentYear + 1
-    const firstSemSeason = currentMonth < 7 ? 'Fall' : 'Spring'
-    firstSemester = `${firstSemSeason} ${firstSemYear}`
-  }
+  // Use start_semester and start_year directly from DB
+  // instead of inferring from current date
+  const firstSemester = `${startSemester} ${startYear}`
 
   const unsatisfied = checkRequirements(requirements, completedCodes)
   const selected = selectCourses(unsatisfied, allDoneCodes, requirements)
-  const ordered = topologicalSort(selected, requirements.prerequisites)
+  const ordered = topologicalSort(selected, requirements.prerequisites, requirements.validPrefixes)
   const withCoreqs = addCorequisites(ordered, requirements.corequisites, allDoneCodes, requirements.allCoursesMap)
   const { plan, targetGraduation } = packSemesters(
     withCoreqs, student, completedCodes, completedCredits,
@@ -71,7 +63,7 @@ async function loadStudent(studentId) {
 }
 
 async function loadRequirements(majorCode, concentration) {
-  const [groupsRes, prereqRes, nupathRes, coreqRes, concRes, allCoursesRes] = await Promise.all([
+  const [groupsRes, prereqRes, nupathRes, coreqRes, concRes, allCoursesRes, prefixRes] = await Promise.all([
     supabase
       .from('requirement_groups')
       .select(`
@@ -84,6 +76,8 @@ async function loadRequirements(majorCode, concentration) {
             title,
             credits,
             is_lab,
+            is_coreq,
+            is_seminar,
             course_type
           )
         )
@@ -97,7 +91,9 @@ async function loadRequirements(majorCode, concentration) {
       .select('course_code, is_required, pick_n, group_id')
       .eq('major_code', majorCode)
       .eq('concentration_name', concentration) : { data: [], error: null },
-    supabase.from('courses').select('code, title, credits, is_lab, course_type')
+    supabase.from('courses').select('code, title, credits, is_lab, is_coreq, is_seminar, course_type'),
+    // Load distinct prefixes from courses table instead of hardcoding
+    supabase.from('courses').select('code').not('code', 'is', null)
   ])
 
   if (groupsRes.error) throw new Error(groupsRes.error.message)
@@ -105,6 +101,13 @@ async function loadRequirements(majorCode, concentration) {
   if (nupathRes.error) throw new Error(nupathRes.error.message)
   if (coreqRes.error) throw new Error(coreqRes.error.message)
   if (allCoursesRes.error) throw new Error(allCoursesRes.error.message)
+
+  // Extract unique prefixes from all course codes in the DB
+  const validPrefixes = new Set(
+    prefixRes.data
+      .map(c => c.code.replace(/[0-9]/g, '').trim())
+      .filter(p => p.length > 0)
+  )
 
   const nupathMap = {}
   for (const row of nupathRes.data) {
@@ -135,7 +138,8 @@ async function loadRequirements(majorCode, concentration) {
     nupathMap,
     corequisites: coreqMap,
     concentrationCourses: concRes.data || [],
-    allCoursesMap
+    allCoursesMap,
+    validPrefixes
   }
 }
 
@@ -250,7 +254,7 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
         if (code === 'CS1210') continue
         if (!allDoneCodes.has(code) && !selected.has(code)) {
           const course = requirements.allCoursesMap[code]
-          if (course && !course.is_lab) {
+          if (course && !course.is_coreq) {
             selected.set(code, course)
             const nupath = requirements.nupathMap[code] || []
             nupath.forEach(n => satisfiedNupath.add(n))
@@ -271,14 +275,14 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
 
         let bestScore = -1
         for (const c of req.options) {
-          if (allDoneCodes.has(c.code) || selected.has(c.code) || c.is_lab) continue
+          if (allDoneCodes.has(c.code) || selected.has(c.code) || c.is_coreq) continue
           const nupath = requirements.nupathMap[c.code] || []
           const score = nupath.filter(n => unsatisfiedNupathCodes.includes(n)).length
           if (score > bestScore) { bestScore = score; best = c }
         }
       } else {
         best = req.options.find(c =>
-          !allDoneCodes.has(c.code) && !selected.has(c.code) && !c.is_lab
+          !allDoneCodes.has(c.code) && !selected.has(c.code) && !c.is_coreq
         )
       }
 
@@ -296,7 +300,7 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
       const isScienceReq = req.group.name === 'Science Requirement'
       const hardSciencePrefixes = ['BIOL', 'CHEM', 'ENVR', 'PHYS']
 
-      const completedInReq = req.options.filter(c => allDoneCodes.has(c.code) && !c.is_lab)
+      const completedInReq = req.options.filter(c => allDoneCodes.has(c.code) && !c.is_coreq)
       const completedCreditsInReq = completedInReq.reduce((sum, c) => sum + parseFloat(c.credits || 0), 0)
       const completedScienceCourses = isScienceReq ? completedInReq.length : 0
       const minScienceCourses = isScienceReq ? Math.max(0, 2 - completedScienceCourses) : 0
@@ -305,7 +309,7 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
 
       for (const course of req.options) {
         if (creditsAdded >= req.creditsNeeded && scienceCoursesAdded >= minScienceCourses) break
-        if (allDoneCodes.has(course.code) || selected.has(course.code) || course.is_lab) continue
+        if (allDoneCodes.has(course.code) || selected.has(course.code) || course.is_coreq) continue
         const isHardScience = hardSciencePrefixes.some(p => course.code.startsWith(p))
         if (creditsAdded >= req.creditsNeeded && isScienceReq && !isHardScience) continue
         selected.set(course.code, course)
@@ -353,19 +357,32 @@ function selectCourses(unsatisfied, allDoneCodes, requirements) {
   return Array.from(selected.values())
 }
 
-function topologicalSort(courses, prereqMap) {
+function topologicalSort(courses, prereqMap, validPrefixes) {
   const courseSet = new Set(courses.map(c => c.code))
   const visited = new Set()
   const result = []
 
-  const corePrefixes = ['CS', 'CY', 'DS', 'IS', 'EECE', 'MATH']
-  const sciencePrefixes = ['BIOL', 'CHEM', 'PHYS', 'ENVR']
+  // Science prefixes are deprioritized relative to core academic prefixes.
+  // They get a +1000 offset so they're placed later in the plan
+  // since science courses are typically taken after establishing the CS foundation.
+  // Non-science, non-core courses (humanities, social sciences, etc.) get a +500 offset
+  // so they're placed in the middle — after core CS but before or alongside science.
+  const sciencePrefixes = new Set(['BIOL', 'CHEM', 'PHYS', 'ENVR'])
+
+  // Core prefixes are CS-adjacent disciplines that should be scheduled early
+  // These are derived from validPrefixes loaded from the DB minus science prefixes
+  const corePrefixes = new Set(
+    [...validPrefixes].filter(p => !sciencePrefixes.has(p))
+  )
+
+  const SCIENCE_OFFSET = 1000  // Push science courses later in plan
+  const OTHER_OFFSET = 500     // Push humanities/social sciences to middle
 
   const getPriority = (code) => {
     const num = parseInt(code.replace(/[^0-9]/g, '')) || 9999
-    if (corePrefixes.some(p => code.startsWith(p))) return num
-    if (sciencePrefixes.some(p => code.startsWith(p))) return num + 1000
-    return num + 500
+    if (sciencePrefixes.has(code.replace(/[0-9]/g, ''))) return num + SCIENCE_OFFSET
+    if (corePrefixes.has(code.replace(/[0-9]/g, ''))) return num
+    return num + OTHER_OFFSET
   }
 
   const sorted = [...courses].sort((a, b) => getPriority(a.code) - getPriority(b.code))
@@ -401,6 +418,8 @@ function addCorequisites(courses, coreqMap, allDoneCodes, allCoursesMap) {
           title: coreqData.title || coreqCode,
           credits: coreqData.credits || 0,
           is_lab: coreqData.is_lab || true,
+          is_coreq: true,
+          is_seminar: coreqData.is_seminar || false,
           course_type: coreqData.course_type || 'lab',
           _coreqOf: course.code
         })
@@ -445,13 +464,11 @@ function semesterToNumber(label) {
   return year * 10 + (seasonOrder[season] ?? 0)
 }
 
-// Place a single course into a specific semester index, with its coreqs
 function placeCourseAt(code, semIndex, semesterPlans, placed, completedCodes, requirements) {
   if (completedCodes.has(code)) return
   if (placed.has(code)) return
   const courseData = requirements.allCoursesMap[code]
   if (!courseData) return
-
   semesterPlans[semIndex].courses.push(courseData)
   semesterPlans[semIndex].credits += parseFloat(courseData.credits || 0)
   placed.set(code, semIndex)
@@ -466,14 +483,14 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   const firstCoopSemester = getFirstCoopSemester(startYear, coopPattern)
   const firstSemesterNum = semesterToNumber(firstSemester)
 
-  const allSemesters = generateAllSemesters(startYear, `Fall ${startYear}`, coopSemesters, 24)
+  const allSemesters = generateAllSemesters(startYear, firstSemester, coopSemesters, 24)
   const semesterPlans = allSemesters.map(s => ({
     semester: s.label,
     type: s.type,
     courses: [],
     credits: 0,
     upperDivCount: 0,
-    isPast: semesterToNumber(s.label) < firstSemesterNum
+    isPast: false
   }))
 
   // Add COOP3945 to co-op semesters
@@ -481,36 +498,33 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
     if (semesterPlans[i].type === 'coop') {
       semesterPlans[i].courses.push({
         code: 'COOP3945', title: 'Co-op Work Experience',
-        credits: 0, is_lab: false, course_type: 'lecture'
+        credits: 0, is_lab: false, is_coreq: false, course_type: 'lecture'
       })
     }
   }
 
-  // Find key semester indices
-  const firstFutureIndex = semesterPlans.findIndex(s => !s.isPast && s.type !== 'coop')
+  const firstFutureIndex = 0
   const firstCoopIndex = semesterPlans.findIndex(s => s.semester === firstCoopSemester)
 
-  // Get all future non-coop, non-summer semester indices in order
+  // Get all regular (non-coop, non-summer) semester indices
   const futureRegularSems = []
   for (let i = 0; i < semesterPlans.length; i++) {
-    if (!semesterPlans[i].isPast && semesterPlans[i].type === 'regular') {
-      futureRegularSems.push(i)
-    }
+    if (semesterPlans[i].type === 'regular') futureRegularSems.push(i)
   }
 
-  // Build future semester index map for upper div tracking
+  // Build future semester index map for upper div limit tracking
   const futureSemIndexMap = []
   let idx = 0
   for (let i = 0; i < semesterPlans.length; i++) {
-    if (!semesterPlans[i].isPast && semesterPlans[i].type !== 'coop') {
+    if (semesterPlans[i].type !== 'coop') {
       futureSemIndexMap[i] = idx++
     }
   }
 
-  // ── STEP 1: Hard-anchor the core sequence ──
-  // Sem 1: CS1200, CS1800, CS2000 (or CS2100 if CS2000 done)
-  // Sem 2: CS2100 (or CS3100 if CS2100 done)
-  // Sem 3: CS3100 (if not yet placed)
+  // ── STEP 1: Hard-anchor core programming sequence ──
+  // Semester 1: CS1200, CS1800, CS2000 (or CS2100 if CS2000 done)
+  // Semester 2: CS2100 (or CS3100 if CS2100 done)
+  // Semester 3: CS3100
   const sem1 = futureRegularSems[0]
   const sem2 = futureRegularSems[1]
   const sem3 = futureRegularSems[2]
@@ -518,7 +532,6 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   if (sem1 !== undefined) {
     placeCourseAt('CS1200', sem1, semesterPlans, placed, completedCodes, requirements)
     placeCourseAt('CS1800', sem1, semesterPlans, placed, completedCodes, requirements)
-    // CS2000 goes sem1 if not completed, else CS2100 goes sem1
     if (!completedCodes.has('CS2000')) {
       placeCourseAt('CS2000', sem1, semesterPlans, placed, completedCodes, requirements)
     } else if (!completedCodes.has('CS2100')) {
@@ -527,7 +540,6 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   }
 
   if (sem2 !== undefined) {
-    // CS2100 goes sem2 if CS2000 was in sem1 and CS2100 not completed
     if (!completedCodes.has('CS2100') && !placed.has('CS2100')) {
       placeCourseAt('CS2100', sem2, semesterPlans, placed, completedCodes, requirements)
     } else if (!completedCodes.has('CS3100') && !placed.has('CS3100')) {
@@ -541,12 +553,12 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
     }
   }
 
-  // ── STEP 2: Place CS1210 in semester immediately before first co-op ──
+  // ── STEP 2: Place CS1210 immediately before first co-op ──
   const cs1210Data = requirements.allCoursesMap['CS1210']
   if (cs1210Data && !completedCodes.has('CS1210')) {
     if (firstCoopIndex > 0) {
       for (let i = firstCoopIndex - 1; i >= 0; i--) {
-        if (semesterPlans[i].type !== 'coop' && !semesterPlans[i].isPast) {
+        if (semesterPlans[i].type === 'regular') {
           semesterPlans[i].courses.push(cs1210Data)
           semesterPlans[i].credits += parseFloat(cs1210Data.credits || 0)
           placed.set('CS1210', i)
@@ -557,15 +569,12 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   }
 
   // ── STEP 3: Place all remaining regular courses ──
-  const regularCourses = orderedCourses.filter(c =>
-    !c._coreqOf && c.code !== 'CS1210' &&
-    !['CS1200', 'CS2000', 'CS2100', 'CS3100'].includes(c.code)
-  )
+  const anchorCodes = new Set(['CS1200', 'CS1800', 'CS2000', 'CS2100', 'CS3100', 'CS1210'])
+  const regularCourses = orderedCourses.filter(c => !c._coreqOf && !anchorCodes.has(c.code))
   const coreqCourses = orderedCourses.filter(c => c._coreqOf)
 
   for (const course of regularCourses) {
-    if (!course.code) continue
-    if (placed.has(course.code)) continue
+    if (!course.code || placed.has(course.code)) continue
 
     const prereqs = requirements.prerequisites[course.code] || []
     let earliestSemester = firstFutureIndex
@@ -591,7 +600,6 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
     const isUpperDiv = courseNum >= 3000
 
     for (let i = earliestSemester; i < semesterPlans.length; i++) {
-      if (semesterPlans[i].isPast) continue
       if (semesterPlans[i].type === 'coop') continue
 
       const maxForSem = semesterPlans[i].type === 'summer' ? SUMMER_MAX : MAX_CREDITS
@@ -610,8 +618,7 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   }
 
   // ── STEP 4: Place coreqs with their parents ──
-  // First place coreqs for anchor courses
-  const anchorCodes = ['CS1200', 'CS1800', 'CS2000', 'CS2100', 'CS3100']
+  // First for anchor courses
   for (const code of anchorCodes) {
     if (completedCodes.has(code)) continue
     const semIndex = placed.get(code)
@@ -626,6 +633,8 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
         title: coreqData.title || coreqCode,
         credits: coreqData.credits || 0,
         is_lab: coreqData.is_lab || true,
+        is_coreq: true,
+        is_seminar: coreqData.is_seminar || false,
         course_type: coreqData.course_type || 'lab',
         _coreqOf: code
       })
@@ -634,10 +643,9 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
     }
   }
 
-  // Then place remaining coreqs
+  // Then remaining coreqs
   for (const course of coreqCourses) {
-    if (!course.code) continue
-    if (placed.has(course.code)) continue
+    if (!course.code || placed.has(course.code)) continue
     const parentIndex = placed.get(course._coreqOf)
     if (parentIndex !== undefined) {
       semesterPlans[parentIndex].courses.push(course)
@@ -652,23 +660,21 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   let totalCreditsPlaced = completedCredits + requiredCreditsPlaced
   let electiveCounter = 1
 
-  // Find the index of the semester after the last co-op block
-  let afterLastCoopIndex = firstCoopIndex
-  for (let i = firstCoopIndex; i < semesterPlans.length; i++) {
-    if (semesterPlans[i].type === 'coop') afterLastCoopIndex = i + 1
-    else break
+  // Find index of semester after the first co-op block ends
+  let afterFirstCoopIndex = firstCoopIndex
+  if (firstCoopIndex >= 0) {
+    let j = firstCoopIndex
+    while (j < semesterPlans.length && semesterPlans[j].type === 'coop') j++
+    afterFirstCoopIndex = j
   }
 
-  for (let i = afterLastCoopIndex; i < semesterPlans.length && totalCreditsPlaced < TOTAL_CREDITS; i++) {
+  for (let i = afterFirstCoopIndex; i < semesterPlans.length && totalCreditsPlaced < TOTAL_CREDITS; i++) {
     if (semesterPlans[i].type === 'coop') {
-      // Skip coop, then reset afterLastCoopIndex to after this coop block
       let j = i
       while (j < semesterPlans.length && semesterPlans[j].type === 'coop') j++
       i = j - 1
-      afterLastCoopIndex = j
       continue
     }
-    if (semesterPlans[i].isPast) continue
 
     const maxForSem = semesterPlans[i].type === 'summer' ? SUMMER_MAX : MAX_CREDITS
     let remaining = maxForSem - semesterPlans[i].credits
@@ -688,20 +694,17 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
   }
 
   // Find last semester with real courses
-  let lastNonEmptySemIndex = firstFutureIndex
+  let lastNonEmptySemIndex = 0
   for (let i = semesterPlans.length - 1; i >= 0; i--) {
     const realCourses = semesterPlans[i].courses.filter(c => c.code !== 'COOP3945')
-    if (realCourses.length > 0) {
-      lastNonEmptySemIndex = i
-      break
-    }
+    if (realCourses.length > 0) { lastNonEmptySemIndex = i; break }
   }
 
   const targetGraduation = semesterPlans[lastNonEmptySemIndex].semester
 
   const finalPlan = semesterPlans
     .slice(0, lastNonEmptySemIndex + 1)
-    .filter(s => !s.isPast && (s.courses.length > 0 || s.type === 'coop'))
+    .filter(s => s.courses.length > 0 || s.type === 'coop')
     .map(({ upperDivCount, isPast, ...s }) => s)
 
   return { plan: finalPlan, targetGraduation }
@@ -709,9 +712,9 @@ function packSemesters(orderedCourses, student, completedCodes, completedCredits
 
 function generateAllSemesters(startYear, firstSemester, coopSemesters, count) {
   const semesters = []
-  const [firstSeason, firstYearStr] = firstSemester.split(' ')
-  let season = firstSeason
-  let year = parseInt(firstYearStr)
+  const parts = firstSemester.split(' ')
+  let season = parts[0]
+  let year = parseInt(parts[parts.length - 1])
 
   for (let i = 0; i < count; i++) {
     const labels = season === 'Fall'

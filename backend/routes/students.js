@@ -12,7 +12,9 @@ router.post('/', async (req, res) => {
       concentration,
       catalog_year,
       start_year,
+      start_semester,
       num_coops,
+      coop_pattern,
       target_graduation
     } = req.body
 
@@ -31,7 +33,9 @@ router.post('/', async (req, res) => {
         concentration,
         catalog_year,
         start_year,
+        start_semester: start_semester || 'Fall',
         num_coops,
+        coop_pattern,
         target_graduation
       }], { onConflict: 'email' })
       .select()

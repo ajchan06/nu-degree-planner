@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import api from '../lib/api'
+import axios from 'axios'
 
 const MAJORS = [
   { code: 'BSCS', name: 'Computer Science' },
@@ -52,6 +52,7 @@ export default function Onboarding() {
     major_code: 'BSCS',
     concentration: 'Systems',
     start_year: CURRENT_YEAR,
+    start_semester: 'Fall',
     num_coops: 2,
     coop_pattern: 'spring',
     ap_credits: [],
@@ -59,31 +60,17 @@ export default function Onboarding() {
   })
 
   const [courseInput, setCourseInput] = useState('')
-  const [courseCredits, setCourseCredits] = useState(4)
   const [courseValidation, setCourseValidation] = useState('idle')
   const [courseCache, setCourseCache] = useState({})
   const [courseSuggestion, setCourseSuggestion] = useState(null)
 
   useEffect(() => {
     const code = courseInput.trim().toUpperCase()
-    if (!code) {
-      setCourseValidation('idle')
-      setCourseSuggestion(null)
-      return
-    }
+    if (!code) { setCourseValidation('idle'); setCourseSuggestion(null); return }
 
     const prefix = code.replace(/[0-9]/g, '')
-    if (!VALID_PREFIXES.has(prefix)) {
-      setCourseValidation('invalid')
-      setCourseSuggestion(null)
-      return
-    }
-
-    if (!/[0-9]/.test(code)) {
-      setCourseValidation('idle')
-      setCourseSuggestion(null)
-      return
-    }
+    if (!VALID_PREFIXES.has(prefix)) { setCourseValidation('invalid'); setCourseSuggestion(null); return }
+    if (!/[0-9]/.test(code)) { setCourseValidation('idle'); setCourseSuggestion(null); return }
 
     if (courseCache[prefix]) {
       const match = courseCache[prefix].find(c => c.code === code)
@@ -92,17 +79,14 @@ export default function Onboarding() {
       return
     }
 
-    api.get(`/courses?prefix=${prefix}`)
+    axios.get(`/api/courses?prefix=${prefix}`)
       .then(res => {
         setCourseCache(prev => ({ ...prev, [prefix]: res.data }))
         const match = res.data.find(c => c.code === code)
         setCourseValidation(match ? 'valid' : 'invalid')
         setCourseSuggestion(match || null)
       })
-      .catch(() => {
-        setCourseValidation('idle')
-        setCourseSuggestion(null)
-      })
+      .catch(() => { setCourseValidation('idle'); setCourseSuggestion(null) })
   }, [courseInput])
 
   function updateForm(field, value) {
@@ -128,18 +112,16 @@ export default function Onboarding() {
   function addCourse() {
     if (courseValidation !== 'valid') return
     const code = courseInput.trim().toUpperCase()
-    if (!code) return
-    if (form.completed_courses.find(c => c.code === code)) return
+    if (!code || form.completed_courses.find(c => c.code === code)) return
     setForm(prev => ({
       ...prev,
       completed_courses: [...prev.completed_courses, {
         code,
-        credits: courseSuggestion?.credits || courseCredits,
+        credits: courseSuggestion?.credits || 4,
         source: 'taken'
       }]
     }))
     setCourseInput('')
-    setCourseCredits(4)
     setCourseValidation('idle')
     setCourseSuggestion(null)
   }
@@ -155,13 +137,14 @@ export default function Onboarding() {
     setLoading(true)
     setError(null)
     try {
-      const studentRes = await api.post('/students', {
+      const studentRes = await axios.post('/api/students', {
         name: form.name,
         email: form.email,
         major_code: form.major_code,
         concentration: form.concentration,
         catalog_year: form.start_year,
         start_year: form.start_year,
+        start_semester: form.start_semester,
         num_coops: form.num_coops,
         coop_pattern: form.coop_pattern,
         target_graduation: null
@@ -170,24 +153,20 @@ export default function Onboarding() {
 
       for (const ap of form.ap_credits) {
         for (const course of ap.courses) {
-          await api.post(`/students/${studentId}/courses`, {
-            course_code: course.code,
-            status: 'ap',
-            source: 'ap',
-            credits: course.credits
+          await axios.post(`/api/students/${studentId}/courses`, {
+            course_code: course.code, status: 'ap', source: 'ap', credits: course.credits
           })
         }
       }
 
       for (const course of form.completed_courses) {
-        await api.post(`/students/${studentId}/courses`, {
-          course_code: course.code,
-          status: 'completed',
-          source: course.source || 'taken',
-          credits: course.credits
+        await axios.post(`/api/students/${studentId}/courses`, {
+          course_code: course.code, status: 'completed',
+          source: course.source || 'taken', credits: course.credits
         })
       }
 
+      localStorage.setItem('studentId', studentId)
       navigate(`/plan/${studentId}`)
     } catch (err) {
       setError(err.response?.data?.error || 'Something went wrong')
@@ -208,11 +187,9 @@ export default function Onboarding() {
             key={i}
             onClick={() => setStep(i + 1)}
             className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${
-              step === i + 1
-                ? 'border-red-600 text-red-600'
-                : step > i + 1
-                ? 'border-green-500 text-green-600'
-                : 'border-transparent text-gray-400'
+              step === i + 1 ? 'border-red-600 text-red-600'
+              : step > i + 1 ? 'border-green-500 text-green-600'
+              : 'border-transparent text-gray-400'
             }`}
           >
             {step > i + 1 ? '✓ ' : ''}{label}
@@ -246,21 +223,31 @@ export default function Onboarding() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Year you started at Northeastern</label>
-              <select
-                value={form.start_year}
-                onChange={e => updateForm('start_year', parseInt(e.target.value))}
-                className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
-              >
-                {START_YEARS.map(y => (
-                  <option key={y} value={y}>Fall {y}</option>
-                ))}
-              </select>
+              <label className="block text-sm font-medium text-gray-700 mb-1">When did you start at Northeastern?</label>
+              <div className="flex gap-3">
+                <select
+                  value={form.start_semester}
+                  onChange={e => updateForm('start_semester', e.target.value)}
+                  className="border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
+                >
+                  <option value="Fall">Fall</option>
+                  <option value="Spring">Spring</option>
+                </select>
+                <select
+                  value={form.start_year}
+                  onChange={e => updateForm('start_year', parseInt(e.target.value))}
+                  className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
+                >
+                  {START_YEARS.map(y => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Number of co-ops</label>
               <div className="flex gap-4">
-                {[1, 2, 3].map(n => (
+                {[1, 2].map(n => (
                   <button
                     key={n}
                     onClick={() => updateForm('num_coops', n)}
@@ -393,11 +380,9 @@ export default function Onboarding() {
                   onChange={e => setCourseInput(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && addCourse()}
                   className={`w-full border-2 rounded-lg px-4 py-2 focus:outline-none transition-colors ${
-                    courseValidation === 'valid'
-                      ? 'border-green-500 focus:border-green-500'
-                      : courseValidation === 'invalid'
-                      ? 'border-red-400 focus:border-red-400'
-                      : 'border-gray-300 focus:border-red-500'
+                    courseValidation === 'valid' ? 'border-green-500 focus:border-green-500'
+                    : courseValidation === 'invalid' ? 'border-red-400 focus:border-red-400'
+                    : 'border-gray-300 focus:border-red-500'
                   }`}
                   placeholder="e.g. CS1800"
                 />
@@ -427,10 +412,7 @@ export default function Onboarding() {
                     <span className="font-medium text-gray-800">{c.code}</span>
                     <span className="text-gray-500 text-sm ml-2">· {c.credits} credits</span>
                   </div>
-                  <button
-                    onClick={() => removeCourse(c.code)}
-                    className="text-red-500 hover:text-red-700 text-sm"
-                  >
+                  <button onClick={() => removeCourse(c.code)} className="text-red-500 hover:text-red-700 text-sm">
                     Remove
                   </button>
                 </div>
@@ -455,8 +437,8 @@ export default function Onboarding() {
                 <div className="font-medium text-gray-800">{form.email || '—'}</div>
               </div>
               <div className="px-5 py-4">
-                <div className="text-sm text-gray-500">Start Year</div>
-                <div className="font-medium text-gray-800">Fall {form.start_year}</div>
+                <div className="text-sm text-gray-500">Start Date</div>
+                <div className="font-medium text-gray-800">{form.start_semester} {form.start_year}</div>
               </div>
               <div className="px-5 py-4">
                 <div className="text-sm text-gray-500">Major</div>
@@ -464,7 +446,9 @@ export default function Onboarding() {
               </div>
               <div className="px-5 py-4">
                 <div className="text-sm text-gray-500">Co-ops</div>
-                <div className="font-medium text-gray-800">{form.num_coops} · {form.coop_pattern === 'spring' ? 'Spring pattern (Jan–June)' : 'Fall pattern (July–Dec)'}</div>
+                <div className="font-medium text-gray-800">
+                  {form.num_coops} · {form.coop_pattern === 'spring' ? 'Spring pattern (Jan–June)' : 'Fall pattern (July–Dec)'}
+                </div>
               </div>
               <div className="px-5 py-4">
                 <div className="text-sm text-gray-500">AP Credits</div>
@@ -475,9 +459,7 @@ export default function Onboarding() {
               <div className="px-5 py-4">
                 <div className="text-sm text-gray-500">Completed Courses</div>
                 <div className="font-medium text-gray-800">
-                  {form.completed_courses.length > 0
-                    ? form.completed_courses.map(c => c.code).join(', ')
-                    : 'None'}
+                  {form.completed_courses.length > 0 ? form.completed_courses.map(c => c.code).join(', ') : 'None'}
                 </div>
               </div>
             </div>
