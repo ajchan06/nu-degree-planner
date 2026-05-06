@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import axios from 'axios'
+import api from '../lib/api'
 
 export default function Plan() {
   const { studentId } = useParams()
@@ -11,7 +11,7 @@ export default function Plan() {
   const [activeTab, setActiveTab] = useState('plan')
 
   useEffect(() => {
-    axios.get(`/api/plan/${studentId}`)
+    api.get(`/plan/${studentId}`)
       .then(res => {
         setData(res.data)
         setLoading(false)

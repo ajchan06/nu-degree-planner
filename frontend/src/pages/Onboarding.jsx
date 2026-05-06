@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import axios from 'axios'
+import api from '../lib/api'
 
 const MAJORS = [
   { code: 'BSCS', name: 'Computer Science' },
@@ -92,7 +92,7 @@ export default function Onboarding() {
       return
     }
 
-    axios.get(`/api/courses?prefix=${prefix}`)
+    api.get(`/courses?prefix=${prefix}`)
       .then(res => {
         setCourseCache(prev => ({ ...prev, [prefix]: res.data }))
         const match = res.data.find(c => c.code === code)
@@ -155,7 +155,7 @@ export default function Onboarding() {
     setLoading(true)
     setError(null)
     try {
-      const studentRes = await axios.post('/api/students', {
+      const studentRes = await api.post('/students', {
         name: form.name,
         email: form.email,
         major_code: form.major_code,
@@ -170,7 +170,7 @@ export default function Onboarding() {
 
       for (const ap of form.ap_credits) {
         for (const course of ap.courses) {
-          await axios.post(`/api/students/${studentId}/courses`, {
+          await api.post(`/students/${studentId}/courses`, {
             course_code: course.code,
             status: 'ap',
             source: 'ap',
@@ -180,7 +180,7 @@ export default function Onboarding() {
       }
 
       for (const course of form.completed_courses) {
-        await axios.post(`/api/students/${studentId}/courses`, {
+        await api.post(`/students/${studentId}/courses`, {
           course_code: course.code,
           status: 'completed',
           source: course.source || 'taken',
